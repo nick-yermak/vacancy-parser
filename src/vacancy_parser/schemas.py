@@ -1,3 +1,4 @@
+from collections.abc import Callable, Hashable
 from enum import StrEnum
 from typing import Self
 
@@ -47,19 +48,21 @@ class CefrLevel(StrEnum):
     UNKNOWN = "unknown"
 
 
-def _dedupe_preserve_order(items: list[str], *, case_insensitive: bool) -> list[str]:
-    """Drop empties and duplicates; keep first spelling and insertion order.
+def _dedupe_preserve_order[T, H: Hashable](items: list[T], *, key: Callable[[T], H]) -> list[T]:
+    """Drop duplicates by ``key``, keeping the first item and insertion order.
 
-    ``set()`` alone is wrong: unordered (pre-3.7 semantics aside), and for
-    case-insensitive dedupe it cannot choose which spelling to keep.
+    ``set`` is always unordered, so it cannot preserve first-seen spelling or
+    stable order. ``dict`` keeps insertion order (guaranteed since 3.7); the
+    first-wins loop below is the case-insensitive / custom-key equivalent of
+    ``list(dict.fromkeys(items))`` for plain hashables.
     """
-    seen: set[str] = set()
-    result: list[str] = []
+    seen: set[H] = set()
+    result: list[T] = []
     for item in items:
-        key = item.casefold() if case_insensitive else item
-        if not item or key in seen:
+        k = key(item)
+        if k in seen:
             continue
-        seen.add(key)
+        seen.add(k)
         result.append(item)
     return result
 
@@ -67,9 +70,11 @@ def _dedupe_preserve_order(items: list[str], *, case_insensitive: bool) -> list[
 class Salary(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
 
+    # Decision A: required-nullable — every key must be present; null/unknown explicit.
+    # strict=True on amounts: bool/str coercion (True→1, "20000.0"→20000) is LLM garbage.
     min: int | None = Field(
-        default=None,
         ge=0,
+        strict=True,
         description=(
             "Lower bound of the salary range as a non-negative integer. "
             "null if only an upper bound is stated (e.g. 'up to 25 000'). "
@@ -77,8 +82,8 @@ class Salary(BaseModel):
         ),
     )
     max: int | None = Field(
-        default=None,
         ge=0,
+        strict=True,
         description=(
             "Upper bound of the salary range as a non-negative integer. "
             "null if only a lower bound is stated (e.g. 'from 20 000'). "
@@ -86,15 +91,13 @@ class Salary(BaseModel):
         ),
     )
     currency: str | None = Field(
-        default=None,
         description=(
-            "ISO 4217 currency code, exactly 3 letters, e.g. PLN, EUR, USD. "
-            "null if currency is not stated. Do not invent; do not use symbols "
-            "like zł or $."
+            "ISO 4217 currency code, exactly 3 ASCII letters, e.g. PLN, EUR, USD. "
+            "null if currency is not stated even when an amount is present. "
+            "Do not invent; do not use symbols like zl or $."
         ),
     )
     period: SalaryPeriod = Field(
-        default=SalaryPeriod.UNKNOWN,
         description=(
             "Pay period for the amounts: hour, day, month, or year. "
             "Use unknown if the posting does not say; do not guess."
@@ -108,10 +111,8 @@ class Salary(BaseModel):
         if value is None:
             return None
         normalized = value.upper()
-        if len(normalized) != 3 or not normalized.isalpha():
-            raise ValueError(
-                "currency must be a 3-letter ISO 4217 code (e.g. PLN), not a symbol"
-            )
+        if len(normalized) != 3 or not normalized.isascii() or not normalized.isalpha():
+            raise ValueError("currency must be a 3-letter ISO 4217 code (e.g. PLN), not a symbol")
         return normalized
 
     @model_validator(mode="after")
@@ -135,10 +136,10 @@ class LanguageRequirement(BaseModel):
             "Do not invent languages that are not mentioned."
         ),
     )
+    # Decision A: level is required; emit unknown explicitly when CEFR is absent.
     level: CefrLevel = Field(
-        default=CefrLevel.UNKNOWN,
         description=(
-            "CEFR level if stated explicitly (a1–c2). "
+            "CEFR level if stated explicitly (a1-c2). "
             "Use unknown if the posting does not give a level; do not guess."
         ),
     )
@@ -179,8 +180,8 @@ class JobPosting(BaseModel):
     )
     contract_types: list[ContractType] = Field(
         description=(
-            "Contract types offered. Polish market: b2b, uop (umowa o pracę), "
-            "uz (umowa zlecenie), uod (umowa o dzieło), other. "
+            "Contract types offered. Polish market: b2b, uop (umowa o prace / employment), "
+            "uz (umowa zlecenie), uod (umowa o dzielo / specific-task), other. "
             "Empty list if none are stated; do not invent."
         ),
     )
@@ -211,9 +212,10 @@ class JobPosting(BaseModel):
         ),
     )
     summary: str = Field(
+        min_length=1,
         max_length=300,
         description=(
-            "Concise factual summary of the role, at most 300 characters. "
+            "Concise factual summary of the role, 1-300 characters. "
             "Stay within the limit; do not pad with marketing fluff."
         ),
     )
@@ -237,37 +239,20 @@ class JobPosting(BaseModel):
     @field_validator("contract_types")
     @classmethod
     def dedupe_contract_types(cls, value: list[ContractType]) -> list[ContractType]:
-        seen: set[ContractType] = set()
-        result: list[ContractType] = []
-        for item in value:
-            if item in seen:
-                continue
-            seen.add(item)
-            result.append(item)
-        return result
+        return _dedupe_preserve_order(value, key=lambda item: item)
 
     @field_validator("tech_stack")
     @classmethod
     def normalize_tech_stack(cls, value: list[str]) -> list[str]:
         # after: list[str]; items already stripped. Drop empties + casefold dedupe.
-        return _dedupe_preserve_order(value, case_insensitive=True)
+        return _dedupe_preserve_order([item for item in value if item], key=str.casefold)
 
     @field_validator("languages")
     @classmethod
-    def dedupe_languages(
-        cls, value: list[LanguageRequirement]
-    ) -> list[LanguageRequirement]:
-        seen: set[str] = set()
-        result: list[LanguageRequirement] = []
-        for item in value:
-            key = item.language.casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            result.append(item)
-        return result
+    def dedupe_languages(cls, value: list[LanguageRequirement]) -> list[LanguageRequirement]:
+        return _dedupe_preserve_order(value, key=lambda item: item.language.casefold())
 
     @field_validator("red_flags")
     @classmethod
     def normalize_red_flags(cls, value: list[str]) -> list[str]:
-        return _dedupe_preserve_order(value, case_insensitive=True)
+        return _dedupe_preserve_order([item for item in value if item], key=str.casefold)
