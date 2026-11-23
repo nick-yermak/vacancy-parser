@@ -1,9 +1,18 @@
 """LLM client boundary: protocol, response metadata, errors, and a fake client.
 
-Validation of the model JSON into JobPosting (or any schema) is intentionally
-left to the service layer — see module decisions in the feat(llm) commit.
+Design decisions
+----------------
+F — Service validates. The client returns raw response text plus call metadata;
+    JobPosting (or any schema) parsing and retry live above this module. That
+    lets FakeLLMClient script invalid JSON without a client-side validator.
+G — complete() takes type[BaseModel], not a TypeVar. A type parameter would only
+    pay off if the return type depended on the schema (e.g. client returns T).
+    Under F it does not — generics belong on the future service that returns T.
+H — FakeLLMClient lives here (not in tests/) so service tests can inject it
+    without importing from tests/, and so it stays available for dry-run/demo.
 """
 
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
@@ -29,32 +38,33 @@ class LLMResponse:
 class LLMClient(Protocol):
     """Structural client seam. Checked by the type checker, not isinstance."""
 
-    def complete[T: BaseModel](
+    def complete(
         self,
         prompt: str,
-        response_schema: type[T],
+        response_schema: type[BaseModel],
     ) -> LLMResponse:
         """Send prompt with a JSON response schema; return raw text + metadata."""
         ...
 
 
 class FakeLLMClient:
-    """Scripted client for tests: queued responses/errors and recorded prompts."""
+    """Scripted client for tests: queued responses/errors and recorded calls."""
 
     def __init__(self, script: Sequence[LLMResponse | BaseException]) -> None:
-        self._script = list(script)
+        self._script: deque[LLMResponse | BaseException] = deque(script)
         self.prompts: list[str] = []
+        self.schemas: list[type[BaseModel]] = []
 
-    def complete[T: BaseModel](
+    def complete(
         self,
         prompt: str,
-        response_schema: type[T],
+        response_schema: type[BaseModel],
     ) -> LLMResponse:
-        del response_schema  # accepted for Protocol parity; unused by the fake
         self.prompts.append(prompt)
+        self.schemas.append(response_schema)
         if not self._script:
             raise RuntimeError("FakeLLMClient script exhausted: no responses left")
-        item = self._script.pop(0)
+        item = self._script.popleft()
         if isinstance(item, BaseException):
             raise item
         return item

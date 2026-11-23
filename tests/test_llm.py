@@ -1,9 +1,9 @@
-"""Tests for FakeLLMClient scripting and prompt recording."""
+"""Tests for FakeLLMClient scripting and prompt/schema recording."""
 
 import pytest
 from pydantic import BaseModel
 
-from vacancy_parser.llm import FakeLLMClient, LLMError, LLMResponse
+from vacancy_parser.llm import FakeLLMClient, LLMClient, LLMError, LLMResponse
 from vacancy_parser.schemas import JobPosting
 
 
@@ -21,22 +21,29 @@ def _response(text: str, *, model: str = "fake-model") -> LLMResponse:
     )
 
 
+def test_fake_satisfies_llm_client_protocol() -> None:
+    # Protocol is checked at use sites; this assignment is the static seam check.
+    client: LLMClient = FakeLLMClient([_response("ok")])
+    assert client.complete("p", _TinySchema).text == "ok"
+
+
 def test_fake_returns_scripted_responses_in_order() -> None:
     client = FakeLLMClient(
         [
-            _response("first"),
+            _response("{not-json"),
             _response("second"),
         ]
     )
-    assert client.complete("p1", _TinySchema).text == "first"
+    assert client.complete("p1", _TinySchema).text == "{not-json"
     assert client.complete("p2", JobPosting).text == "second"
 
 
-def test_fake_records_prompts_in_order() -> None:
+def test_fake_records_prompts_and_schemas_in_order() -> None:
     client = FakeLLMClient([_response("a"), _response("b")])
     client.complete("prompt-one", _TinySchema)
-    client.complete("prompt-two", _TinySchema)
+    client.complete("prompt-two", JobPosting)
     assert client.prompts == ["prompt-one", "prompt-two"]
+    assert client.schemas == [_TinySchema, JobPosting]
 
 
 def test_fake_raises_scripted_exception() -> None:
@@ -44,17 +51,13 @@ def test_fake_raises_scripted_exception() -> None:
     with pytest.raises(LLMError, match="upstream failed"):
         client.complete("p", _TinySchema)
     assert client.prompts == ["p"]
+    assert client.schemas == [_TinySchema]
 
 
 def test_fake_exhausted_script_raises_clear_error() -> None:
     client = FakeLLMClient([_response("only")])
     client.complete("p1", _TinySchema)
     with pytest.raises(RuntimeError, match="script exhausted"):
-        client.complete("p2", _TinySchema)
+        client.complete("p2", JobPosting)
     assert client.prompts == ["p1", "p2"]
-
-
-def test_fake_can_return_invalid_json_for_service_retry_tests() -> None:
-    # Decision F: client returns raw text; service validates — fake can script junk.
-    client = FakeLLMClient([_response("{not-json"), _response('{"value":"ok"}')])
-    assert client.complete("p", _TinySchema).text == "{not-json"
+    assert client.schemas == [_TinySchema, JobPosting]
