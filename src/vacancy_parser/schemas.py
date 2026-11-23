@@ -94,7 +94,7 @@ class Salary(BaseModel):
         description=(
             "ISO 4217 currency code, exactly 3 ASCII letters, e.g. PLN, EUR, USD. "
             "null if currency is not stated even when an amount is present. "
-            "Do not invent; do not use symbols like zl or $."
+            "Do not invent; do not use symbols like zł or $."
         ),
     )
     period: SalaryPeriod = Field(
@@ -180,8 +180,8 @@ class JobPosting(BaseModel):
     )
     contract_types: list[ContractType] = Field(
         description=(
-            "Contract types offered. Polish market: b2b, uop (umowa o prace / employment), "
-            "uz (umowa zlecenie), uod (umowa o dzielo / specific-task), other. "
+            "Contract types offered. Polish market: b2b, uop (umowa o pracę), "
+            "uz (umowa zlecenie), uod (umowa o dzieło), other. "
             "Empty list if none are stated; do not invent."
         ),
     )

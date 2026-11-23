@@ -63,25 +63,23 @@ class TestValidPayloads:
 
 class TestRequiredNullable:
     def test_missing_company_key_rejected(self, valid_job_dict: dict[str, object]) -> None:
-        payload = valid_job_dict
-        del payload["company"]
+        del valid_job_dict["company"]
         with pytest.raises(ValidationError) as exc_info:
-            JobPosting.model_validate(payload)
+            JobPosting.model_validate(valid_job_dict)
         _assert_loc(exc_info.value, "company")
 
     def test_missing_salary_key_rejected(self, valid_job_dict: dict[str, object]) -> None:
-        payload = valid_job_dict
-        del payload["salary"]
+        del valid_job_dict["salary"]
         with pytest.raises(ValidationError) as exc_info:
-            JobPosting.model_validate(payload)
+            JobPosting.model_validate(valid_job_dict)
         _assert_loc(exc_info.value, "salary")
 
     @pytest.mark.parametrize("field", ["min", "max", "currency", "period"])
     def test_salary_missing_nested_key_rejected(self, field: str) -> None:
-        payload = _valid_salary()
-        del payload[field]
+        salary = _valid_salary()
+        del salary[field]
         with pytest.raises(ValidationError) as exc_info:
-            Salary.model_validate(payload)
+            Salary.model_validate(salary)
         _assert_loc(exc_info.value, field)
 
     def test_language_missing_level_rejected(self) -> None:
@@ -100,39 +98,34 @@ class TestRequiredNullable:
         }
 
     def test_blank_company_becomes_none(self, valid_job_dict: dict[str, object]) -> None:
-        payload = valid_job_dict
-        payload["company"] = "  "
-        posting = JobPosting.model_validate(payload)
+        valid_job_dict["company"] = "  "
+        posting = JobPosting.model_validate(valid_job_dict)
         assert posting.company is None
 
     def test_empty_title_rejected(self, valid_job_dict: dict[str, object]) -> None:
-        payload = valid_job_dict
-        payload["title"] = "   "
+        valid_job_dict["title"] = "   "
         with pytest.raises(ValidationError) as exc_info:
-            JobPosting.model_validate(payload)
+            JobPosting.model_validate(valid_job_dict)
         _assert_loc(exc_info.value, "title")
 
     def test_title_strips_whitespace(self, valid_job_dict: dict[str, object]) -> None:
-        payload = valid_job_dict
-        payload["title"] = "  Senior Dev  "
-        posting = JobPosting.model_validate(payload)
+        valid_job_dict["title"] = "  Senior Dev  "
+        posting = JobPosting.model_validate(valid_job_dict)
         assert posting.title == "Senior Dev"
 
 
 class TestEnums:
     def test_unknown_remote_value_rejected(self, valid_job_dict: dict[str, object]) -> None:
-        payload = valid_job_dict
-        payload["remote"] = "remote-first"
+        valid_job_dict["remote"] = "remote-first"
         with pytest.raises(ValidationError) as exc_info:
-            JobPosting.model_validate(payload)
+            JobPosting.model_validate(valid_job_dict)
         _assert_loc(exc_info.value, "remote")
 
     def test_enum_case_sensitive_no_normalization(self, valid_job_dict: dict[str, object]) -> None:
         # Decision B: StrEnum values are lowercase; "Remote" is rejected, not coerced.
-        payload = valid_job_dict
-        payload["remote"] = "Remote"
+        valid_job_dict["remote"] = "Remote"
         with pytest.raises(ValidationError) as exc_info:
-            JobPosting.model_validate(payload)
+            JobPosting.model_validate(valid_job_dict)
         _assert_loc(exc_info.value, "remote")
 
     @pytest.mark.parametrize(
@@ -150,10 +143,9 @@ class TestEnums:
         field: str,
         value: object,
     ) -> None:
-        payload = valid_job_dict
-        payload[field] = value
+        valid_job_dict[field] = value
         with pytest.raises(ValidationError) as exc_info:
-            JobPosting.model_validate(payload)
+            JobPosting.model_validate(valid_job_dict)
         locs = _error_locs(exc_info.value)
         assert any(loc and loc[0] == field for loc in locs), locs
 
@@ -232,24 +224,22 @@ class TestSalary:
         _assert_loc(exc_info.value, "period")
 
     def test_nested_salary_error_loc_on_job(self, valid_job_dict: dict[str, object]) -> None:
-        payload = valid_job_dict
-        payload["salary"] = {
+        valid_job_dict["salary"] = {
             "min": 200,
             "max": 100,
             "currency": "PLN",
             "period": "hour",
         }
         with pytest.raises(ValidationError) as exc_info:
-            JobPosting.model_validate(payload)
+            JobPosting.model_validate(valid_job_dict)
         locs = _error_locs(exc_info.value)
         assert any(loc and loc[0] == "salary" for loc in locs), locs
 
 
 class TestTechStack:
     def test_normalize_dedupe_preserve_order(self, valid_job_dict: dict[str, object]) -> None:
-        payload = valid_job_dict
-        payload["tech_stack"] = [" Angular ", "angular", "RxJS", ""]
-        posting = JobPosting.model_validate(payload)
+        valid_job_dict["tech_stack"] = [" Angular ", "angular", "RxJS", ""]
+        posting = JobPosting.model_validate(valid_job_dict)
         assert posting.tech_stack == ["Angular", "RxJS"]
 
     def test_empty_list_ok(self, valid_job_dict: dict[str, object]) -> None:
@@ -263,61 +253,54 @@ class TestLanguages:
         assert req.model_dump(mode="json") == {"language": "English", "level": "b2"}
 
     def test_dedupe_by_language_keeps_first(self, valid_job_dict: dict[str, object]) -> None:
-        payload = valid_job_dict
-        payload["languages"] = [
+        valid_job_dict["languages"] = [
             {"language": "English", "level": "b2"},
             {"language": "english", "level": "c1"},
         ]
-        posting = JobPosting.model_validate(payload)
+        posting = JobPosting.model_validate(valid_job_dict)
         assert len(posting.languages) == 1
         assert posting.languages[0].level == CefrLevel.B2
 
     def test_empty_language_name_rejected(self, valid_job_dict: dict[str, object]) -> None:
-        payload = valid_job_dict
-        payload["languages"] = [{"language": "  ", "level": "b2"}]
+        valid_job_dict["languages"] = [{"language": "  ", "level": "b2"}]
         with pytest.raises(ValidationError) as exc_info:
-            JobPosting.model_validate(payload)
+            JobPosting.model_validate(valid_job_dict)
         locs = _error_locs(exc_info.value)
         assert any("language" in loc for loc in locs), locs
 
 
 class TestContractTypes:
     def test_dedupe_preserving_order(self, valid_job_dict: dict[str, object]) -> None:
-        payload = valid_job_dict
-        payload["contract_types"] = ["b2b", "uop", "b2b"]
-        posting = JobPosting.model_validate(payload)
+        valid_job_dict["contract_types"] = ["b2b", "uop", "b2b"]
+        posting = JobPosting.model_validate(valid_job_dict)
         assert posting.contract_types == [ContractType.B2B, ContractType.UOP]
 
 
 class TestSummary:
     def test_exactly_300_ok(self, valid_job_dict: dict[str, object]) -> None:
-        payload = valid_job_dict
-        payload["summary"] = "x" * 300
-        posting = JobPosting.model_validate(payload)
+        valid_job_dict["summary"] = "x" * 300
+        posting = JobPosting.model_validate(valid_job_dict)
         assert len(posting.summary) == 300
 
     def test_301_rejected_not_truncated(self, valid_job_dict: dict[str, object]) -> None:
         # Decision D: ValidationError → retry; do not silently truncate.
-        payload = valid_job_dict
-        payload["summary"] = "x" * 301
+        valid_job_dict["summary"] = "x" * 301
         with pytest.raises(ValidationError) as exc_info:
-            JobPosting.model_validate(payload)
+            JobPosting.model_validate(valid_job_dict)
         _assert_loc(exc_info.value, "summary")
 
     def test_empty_summary_rejected(self, valid_job_dict: dict[str, object]) -> None:
-        payload = valid_job_dict
-        payload["summary"] = ""
+        valid_job_dict["summary"] = ""
         with pytest.raises(ValidationError) as exc_info:
-            JobPosting.model_validate(payload)
+            JobPosting.model_validate(valid_job_dict)
         _assert_loc(exc_info.value, "summary")
 
 
 class TestExtraAndRoundTrip:
     def test_extra_key_forbidden(self, valid_job_dict: dict[str, object]) -> None:
-        payload = valid_job_dict
-        payload["invented_field"] = "nope"
+        valid_job_dict["invented_field"] = "nope"
         with pytest.raises(ValidationError) as exc_info:
-            JobPosting.model_validate(payload)
+            JobPosting.model_validate(valid_job_dict)
         _assert_loc(exc_info.value, "invented_field")
 
     def test_json_round_trip(self, full_job_dict: dict[str, object]) -> None:
