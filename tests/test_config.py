@@ -42,7 +42,10 @@ def test_empty_key_raises_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GEMINI_API_KEY", "")
     with pytest.raises(ConfigError) as exc_info:
         load_settings(env_file=None)
-    assert "GEMINI_API_KEY" in str(exc_info.value)
+    message = str(exc_info.value)
+    assert "GEMINI_API_KEY" in message
+    assert "not set or empty" in message
+    assert "whitespace" not in message
 
 
 def test_padded_key_error_hides_secret(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -52,9 +55,12 @@ def test_padded_key_error_hides_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ConfigError) as exc_info:
         load_settings(env_file=None)
     err = exc_info.value
-    assert "GEMINI_API_KEY" in str(err)
-    assert _PADDED_SECRET not in str(err)
-    assert "sk-padded-secret-should-not-leak" not in str(err)
+    message = str(err)
+    assert "GEMINI_API_KEY" in message
+    assert "whitespace" in message
+    assert "not set or empty" not in message
+    assert _PADDED_SECRET not in message
+    assert "sk-padded-secret-should-not-leak" not in message
     assert err.__cause__ is not None
     assert _PADDED_SECRET not in str(err.__cause__)
     assert "sk-padded-secret-should-not-leak" not in str(err.__cause__)

@@ -10,6 +10,10 @@ _DEFAULT_ENV_FILE = ".env"
 _MISSING_KEY_MESSAGE = (
     "GEMINI_API_KEY is not set or empty. Copy .env.example to .env and fill in your Gemini API key."
 )
+_PADDED_KEY_MESSAGE = (
+    "GEMINI_API_KEY has leading or trailing whitespace. "
+    "Remove the spaces around the key in .env or your environment."
+)
 
 
 class ConfigError(Exception):
@@ -34,8 +38,10 @@ class Settings(BaseSettings):
         # GEMINI_API_KEY= in a copied .env.example is an empty string, not "unset".
         # Reject surrounding whitespace too — do not send " abc " to the API.
         raw = value.get_secret_value()
-        if not raw.strip() or raw != raw.strip():
-            raise ValueError("must not be empty or have surrounding whitespace")
+        if not raw.strip():
+            raise ValueError("empty")
+        if raw != raw.strip():
+            raise ValueError("padded")
         return value
 
 
@@ -54,6 +60,10 @@ def load_settings(*, env_file: str | Path | None = _DEFAULT_ENV_FILE) -> Setting
 def _humanize_validation_error(exc: ValidationError) -> str:
     for error in exc.errors():
         loc = error.get("loc", ())
-        if loc and loc[0] == "gemini_api_key":
-            return _MISSING_KEY_MESSAGE
+        if not loc or loc[0] != "gemini_api_key":
+            continue
+        # Pydantic wraps our ValueError as "Value error, <message>".
+        if error.get("msg", "").endswith("padded"):
+            return _PADDED_KEY_MESSAGE
+        return _MISSING_KEY_MESSAGE
     return f"Invalid configuration: {exc}"
