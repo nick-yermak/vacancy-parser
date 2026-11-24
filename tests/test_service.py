@@ -139,14 +139,31 @@ def test_invalid_both_attempts_raises_parse_error(
     assert exc_info.value.attempts[1].latency_ms == 40.0
 
 
+class _BoomLLMError(LLMError):
+    """Subclass used to assert parse_vacancy preserves concrete error types."""
+
+
 def test_llm_error_propagates_without_retry() -> None:
-    client = FakeLLMClient([LLMError("upstream 429")])
+    client = FakeLLMClient([LLMError("upstream 429", status=429, retryable=True)])
 
     with pytest.raises(LLMError, match="upstream 429") as exc_info:
         parse_vacancy(VACANCY_TEXT, client)
 
     assert len(client.prompts) == 1
     assert exc_info.value.attempts == ()
+    assert exc_info.value.status == 429
+    assert exc_info.value.retryable is True
+
+
+def test_llm_error_subclass_preserved_on_first_attempt() -> None:
+    client = FakeLLMClient([_BoomLLMError("boom", status=503, retryable=True)])
+
+    with pytest.raises(_BoomLLMError, match="boom") as exc_info:
+        parse_vacancy(VACANCY_TEXT, client)
+
+    assert len(client.prompts) == 1
+    assert exc_info.value.attempts == ()
+    assert exc_info.value.status == 503
 
 
 def test_llm_error_on_retry_keeps_prior_attempt_metadata(
@@ -160,11 +177,11 @@ def test_llm_error_on_retry_keeps_prior_attempt_metadata(
                 output_tokens=2,
                 latency_ms=10.0,
             ),
-            LLMError("upstream 429"),
+            _BoomLLMError("upstream 429", status=429, retryable=True),
         ]
     )
 
-    with pytest.raises(LLMError, match="upstream 429") as exc_info:
+    with pytest.raises(_BoomLLMError, match="upstream 429") as exc_info:
         parse_vacancy(VACANCY_TEXT, client)
 
     assert len(client.prompts) == 2
@@ -172,6 +189,8 @@ def test_llm_error_on_retry_keeps_prior_attempt_metadata(
     assert exc_info.value.attempts[0].input_tokens == 11
     assert exc_info.value.attempts[0].output_tokens == 2
     assert exc_info.value.attempts[0].latency_ms == 10.0
+    assert exc_info.value.status == 429
+    assert exc_info.value.retryable is True
 
 
 @pytest.mark.parametrize("text", ["", "   ", "\n\t"])

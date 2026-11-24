@@ -54,8 +54,9 @@ def parse_vacancy(text: str, client: LLMClient) -> ParseResult:
     EmptyVacancyError
         Empty or whitespace-only ``text`` (no LLM call).
     LLMError
-        Propagated from the client without retry. Prior paid attempts in this
-        invocation are attached as ``attempts`` (empty on first-call failure).
+        Propagated from the client without retry (same concrete type/fields).
+        Prior paid attempts in this invocation are attached as ``attempts``
+        (empty on first-call failure).
     ParseError
         Validation failed on every attempt (``attempts`` holds call metadata).
     """
@@ -72,7 +73,10 @@ def parse_vacancy(text: str, client: LLMClient) -> ParseResult:
             # No validation retry on transport failures; keep prior paid metadata.
             response = client.complete(prompt, JobPosting)
         except LLMError as exc:
-            raise LLMError(str(exc), attempts=tuple(attempts)) from exc
+            # Preserve concrete type/fields; attach prior paid attempts in place.
+            if attempts:
+                exc.attempts = tuple(attempts)
+            raise
 
         attempts.append(response)
 

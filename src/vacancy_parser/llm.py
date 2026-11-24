@@ -7,35 +7,6 @@ Gemini schema notes (JobPosting.model_json_schema → response_json_schema)
 by constrained decoding — service validation catches oversize text. Currency has
 no JSON Schema ``pattern`` (Pydantic validator only). Very large/deep schemas may
 be rejected with 400.
-
-Design decisions
-----------------
-F — Service validates. The client returns raw response text plus call metadata;
-    JobPosting (or any schema) parsing and retry live above this module. That
-    lets FakeLLMClient script invalid JSON without a client-side validator.
-G — complete() takes type[BaseModel], not a TypeVar. A type parameter would only
-    pay off if the return type depended on the schema (e.g. client returns T).
-    Under F it does not — the client always returns LLMResponse. The service also
-    keeps a concrete JobPosting in ParseResult; a generic belongs only if a
-    caller-chosen schema drove the return type.
-H — FakeLLMClient lives here (not in tests/) so service tests can inject it
-    without importing from tests/, and so it stays available for dry-run/demo.
-L — generateContent for phase 0. Single-turn JSON extraction matches
-    ``models.generate_content`` + ``response_mime_type`` /
-    ``response_json_schema``; Interactions is the better fit for agentic /
-    multi-turn work in phase 1. generateContent remains fully supported in
-    google-genai 3.6.1; migrating now would add API churn without product gain.
-M — Token counts are ``int | None``. Missing usage_metadata must not become 0 —
-    step-7 cost logs would understate spend; None means unknown, not free.
-N — One LLMError with ``status`` and ``retryable``. Enough for logging and
-    transport-retry without an isinstance zoo; subclasses remain possible.
-    ``attempts`` is service-layer metadata the client never sets; parse_vacancy
-    attaches prior paid attempts onto the same exception instance so type and
-    fields survive.
-O — Own retry loop (3 attempts, exponential backoff, injectable sleep). SDK
-    HttpRetryOptions stay unset (no tenacity retries) so we do not double-retry
-    and can assert attempt counts without real sleeps. Retry 408/429/5xx and
-    network/timeout; never retry 400/401/403 or empty/blocked responses.
 """
 
 from __future__ import annotations
