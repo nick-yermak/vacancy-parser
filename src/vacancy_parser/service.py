@@ -8,6 +8,7 @@ from vacancy_parser.llm import LLMClient, LLMResponse
 from vacancy_parser.schemas import JobPosting
 
 MAX_ATTEMPTS = 2
+MAX_VALIDATION_ERRORS = 5
 
 PROMPT_TEMPLATE = """\
 Extract structured job posting data from the vacancy text below.
@@ -32,6 +33,10 @@ Vacancy text:
 class ParseError(Exception):
     """Raised when the model response cannot be validated after all attempts."""
 
+    def __init__(self, message: str, *, attempts: tuple[LLMResponse, ...]) -> None:
+        super().__init__(message)
+        self.attempts = attempts
+
 
 @dataclass(frozen=True, slots=True)
 class ParseResult:
@@ -51,7 +56,7 @@ def parse_vacancy(text: str, client: LLMClient) -> ParseResult:
     LLMError
         Propagated from the client without retry.
     ParseError
-        Validation failed on every attempt.
+        Validation failed on every attempt (``attempts`` holds call metadata).
     """
     if not text.strip():
         raise ValueError("vacancy text is empty")
@@ -81,14 +86,21 @@ def parse_vacancy(text: str, client: LLMClient) -> ParseResult:
 
         return ParseResult(posting=posting, attempts=tuple(attempts))
 
-    raise ParseError(f"failed to parse vacancy after {MAX_ATTEMPTS} attempts: {errors_text}")
+    raise ParseError(
+        f"failed to parse vacancy after {MAX_ATTEMPTS} attempts: {errors_text}",
+        attempts=tuple(attempts),
+    )
 
 
 def _format_validation_errors(exc: ValidationError) -> str:
     """Short field/message lines for the retry prompt — not ``str(exc)``."""
+    errors = exc.errors()
     lines: list[str] = []
-    for error in exc.errors():
+    for error in errors[:MAX_VALIDATION_ERRORS]:
         loc = ".".join(str(part) for part in error["loc"])
         msg = error["msg"]
         lines.append(f"{loc}: {msg}" if loc else msg)
+    omitted = len(errors) - MAX_VALIDATION_ERRORS
+    if omitted > 0:
+        lines.append(f"... and {omitted} more error(s)")
     return "\n".join(lines)

@@ -97,15 +97,31 @@ def test_invalid_both_attempts_raises_parse_error(
     invalid = {**valid_job_dict, "title": ""}
     client = FakeLLMClient(
         [
-            _response(json.dumps(invalid)),
-            _response(json.dumps(invalid)),
+            _response(
+                json.dumps(invalid),
+                input_tokens=11,
+                output_tokens=2,
+                latency_ms=10.0,
+            ),
+            _response(
+                json.dumps(invalid),
+                input_tokens=22,
+                output_tokens=33,
+                latency_ms=40.0,
+            ),
         ]
     )
 
-    with pytest.raises(ParseError, match="2 attempts"):
+    with pytest.raises(ParseError, match="2 attempts") as exc_info:
         parse_vacancy(VACANCY_TEXT, client)
 
     assert len(client.prompts) == 2
+    # Fail path must still expose both paid attempts for step-7 logging.
+    assert len(exc_info.value.attempts) == 2
+    assert exc_info.value.attempts[0].input_tokens == 11
+    assert exc_info.value.attempts[0].latency_ms == 10.0
+    assert exc_info.value.attempts[1].input_tokens == 22
+    assert exc_info.value.attempts[1].latency_ms == 40.0
 
 
 def test_llm_error_propagates_without_retry() -> None:
@@ -180,3 +196,35 @@ def test_retry_prompt_omits_pydantic_noise(valid_job_dict: dict[str, object]) ->
     assert "input_value" not in retry_prompt
     assert "errors.pydantic.dev" not in retry_prompt
     assert "https://" not in retry_prompt
+
+
+def test_retry_prompt_caps_validation_errors(valid_job_dict: dict[str, object]) -> None:
+    invalid = {
+        **valid_job_dict,
+        "title": "",
+        "seniority": "nope",
+        "remote": "nope",
+        "contract_types": ["nope"],
+        "salary": {
+            "min": -1,
+            "max": -2,
+            "currency": "$$$$",
+            "period": "nope",
+        },
+        "languages": [{"language": "", "level": "nope"}],
+        "summary": "",
+    }
+    client = FakeLLMClient(
+        [
+            _response(json.dumps(invalid)),
+            _response(json.dumps(valid_job_dict)),
+        ]
+    )
+
+    parse_vacancy(VACANCY_TEXT, client)
+
+    retry_prompt = client.prompts[1]
+    assert "more error(s)" in retry_prompt
+    # Cap keeps the retry prompt short even when the payload is widely invalid.
+    error_block = retry_prompt.split("Fix these errors:\n", 1)[1].split("\n\nVacancy text:", 1)[0]
+    assert len(error_block.splitlines()) == 6  # 5 errors + "... and N more"
