@@ -193,6 +193,26 @@ def test_llm_error_on_retry_keeps_prior_attempt_metadata(
     assert exc_info.value.retryable is True
 
 
+def test_llm_error_partial_is_attached_to_attempts() -> None:
+    partial = _response("", input_tokens=15, output_tokens=3, latency_ms=8.0)
+    client = FakeLLMClient(
+        [
+            LLMError(
+                "empty model response",
+                retryable=False,
+                partial=partial,
+                transport_calls=1,
+            )
+        ]
+    )
+
+    with pytest.raises(LLMError, match="empty model response") as exc_info:
+        parse_vacancy(VACANCY_TEXT, client)
+
+    assert exc_info.value.attempts == (partial,)
+    assert exc_info.value.attempts[0].input_tokens == 15
+
+
 @pytest.mark.parametrize("text", ["", "   ", "\n\t"])
 def test_empty_or_whitespace_input_makes_no_llm_call(text: str) -> None:
     client = FakeLLMClient([_response("{}")])

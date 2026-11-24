@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from vacancy_parser.config import ConfigError, load_settings
-from vacancy_parser.llm import GeminiLLMClient
+from vacancy_parser.llm import GeminiLLMClient, LLMClient
 from vacancy_parser.schemas import JobPosting
 from vacancy_parser.service import parse_vacancy
 
@@ -22,8 +22,7 @@ def test_parse_vacancy_with_real_gemini_client() -> None:
     except ConfigError as exc:
         pytest.skip(f"Gemini credentials unavailable: {exc}")
 
-    client: GeminiLLMClient
-    client = GeminiLLMClient(
+    client: LLMClient = GeminiLLMClient(
         api_key=settings.gemini_api_key.get_secret_value(),
         model=settings.gemini_model,
     )
@@ -37,3 +36,4 @@ def test_parse_vacancy_with_real_gemini_client() -> None:
     assert result.attempts[0].input_tokens > 0
     assert result.attempts[0].output_tokens is not None
     assert result.attempts[0].output_tokens > 0
+    assert result.attempts[0].transport_calls >= 1

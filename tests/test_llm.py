@@ -175,6 +175,7 @@ def test_gemini_maps_response_to_llm_response() -> None:
     assert result.input_tokens == 11
     assert result.output_tokens == 7
     assert result.latency_ms >= 0.0
+    assert result.transport_calls == 1
     call = fake.models.calls[0]
     assert call["model"] == "gemini-test"
     assert call["contents"] == "extract"
@@ -206,29 +207,34 @@ def test_gemini_usage_without_tokens_is_none() -> None:
 
 
 def test_gemini_empty_response_raises_llm_error() -> None:
-    client, _fake = _client(
-        [
-            _sdk_response(
-                None,
-                candidates=[],
-                block_reason=genai_types.BlockedReason.SAFETY,
-            )
-        ]
+    response = _sdk_response(
+        None,
+        candidates=[],
+        block_reason=genai_types.BlockedReason.SAFETY,
+        prompt_tokens=9,
+        candidate_tokens=0,
     )
+    client, _fake = _client([response])
 
     with pytest.raises(LLMError, match="empty model response") as exc_info:
         client.complete("p", _TinySchema)
 
     assert exc_info.value.retryable is False
     assert exc_info.value.status is None
+    assert exc_info.value.partial is not None
+    assert exc_info.value.partial.input_tokens == 9
+    assert exc_info.value.partial.output_tokens == 0
+    assert exc_info.value.partial.transport_calls == 1
 
 
-def test_gemini_non_stop_finish_reason_raises() -> None:
+def test_gemini_non_stop_finish_reason_preserves_usage() -> None:
     client, _fake = _client(
         [
             _sdk_response(
                 '{"value":"partial"}',
                 finish_reason=genai_types.FinishReason.MAX_TOKENS,
+                prompt_tokens=12,
+                candidate_tokens=4,
             )
         ]
     )
@@ -237,6 +243,10 @@ def test_gemini_non_stop_finish_reason_raises() -> None:
         client.complete("p", _TinySchema)
 
     assert exc_info.value.retryable is False
+    assert exc_info.value.partial is not None
+    assert exc_info.value.partial.text == '{"value":"partial"}'
+    assert exc_info.value.partial.input_tokens == 12
+    assert exc_info.value.partial.output_tokens == 4
 
 
 @pytest.mark.parametrize(
@@ -284,7 +294,10 @@ def test_gemini_maps_errors(
     assert exc_info.value.retryable is retryable
     assert API_KEY not in str(exc_info.value)
     assert API_KEY not in repr(client)
-    assert exc_info.value.__cause__ is exc
+    if API_KEY in str(exc):
+        assert exc_info.value.__cause__ is None
+    else:
+        assert exc_info.value.__cause__ is exc
 
 
 def test_gemini_retries_retryable_errors_without_real_sleep() -> None:
@@ -307,9 +320,80 @@ def test_gemini_retries_retryable_errors_without_real_sleep() -> None:
     result = client.complete("p", _TinySchema)
 
     assert result.text == '{"value":"ok"}'
+    assert result.transport_calls == 3
     assert len(fake.models.calls) == 3
-    assert len(sleeps) == 2
-    assert sleeps == [0.5, 1.0]
+    assert sleeps == [15.0, 4.0]  # 429 default, then 5xx at attempt_index=1
+
+
+def test_gemini_honors_retry_delay_from_429_details() -> None:
+    sleeps: list[float] = []
+    client, fake = _client(
+        [
+            genai_errors.ClientError(
+                429,
+                {
+                    "error": {
+                        "message": "rate limited",
+                        "status": "RESOURCE_EXHAUSTED",
+                        "details": [
+                            {
+                                "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                                "retryDelay": "41s",
+                            }
+                        ],
+                    }
+                },
+            ),
+            _sdk_response('{"value":"ok"}'),
+        ],
+        sleep=sleeps.append,
+    )
+
+    result = client.complete("p", _TinySchema)
+
+    assert result.transport_calls == 2
+    assert sleeps == [41.0]
+    assert len(fake.models.calls) == 2
+
+
+def test_gemini_per_day_quota_429_is_not_retryable() -> None:
+    sleeps: list[float] = []
+    client, fake = _client(
+        [
+            genai_errors.ClientError(
+                429,
+                {
+                    "error": {
+                        "message": "daily quota",
+                        "status": "RESOURCE_EXHAUSTED",
+                        "details": [
+                            {
+                                "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                                "violations": [
+                                    {
+                                        "quotaId": (
+                                            "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+                                        )
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                },
+            ),
+            _sdk_response('{"value":"ok"}'),
+        ],
+        sleep=sleeps.append,
+    )
+
+    with pytest.raises(LLMError) as exc_info:
+        client.complete("p", _TinySchema)
+
+    assert exc_info.value.status == 429
+    assert exc_info.value.retryable is False
+    assert exc_info.value.transport_calls == 1
+    assert len(fake.models.calls) == 1
+    assert sleeps == []
 
 
 def test_gemini_gives_up_after_transport_attempts() -> None:
@@ -328,8 +412,10 @@ def test_gemini_gives_up_after_transport_attempts() -> None:
 
     assert exc_info.value.status == 429
     assert exc_info.value.retryable is True
+    assert exc_info.value.transport_calls == TRANSPORT_ATTEMPTS
     assert len(fake.models.calls) == TRANSPORT_ATTEMPTS
     assert len(sleeps) == TRANSPORT_ATTEMPTS - 1
+    assert sleeps[0] == 15.0
 
 
 def test_gemini_does_not_retry_client_errors() -> None:
@@ -369,6 +455,13 @@ def test_gemini_does_not_retry_empty_response() -> None:
 
     assert len(fake.models.calls) == 1
     assert sleeps == []
+
+
+def test_gemini_programming_errors_are_not_swallowed() -> None:
+    client, _fake = _client([TypeError("generate_content() got unexpected kwarg")])
+
+    with pytest.raises(TypeError, match="unexpected kwarg"):
+        client.complete("p", _TinySchema)
 
 
 def test_gemini_sdk_client_injection_avoids_real_client_when_provided() -> None:

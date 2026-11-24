@@ -74,8 +74,12 @@ def parse_vacancy(text: str, client: LLMClient) -> ParseResult:
             response = client.complete(prompt, JobPosting)
         except LLMError as exc:
             # Preserve concrete type/fields; attach prior paid attempts in place.
-            if attempts:
-                exc.attempts = tuple(attempts)
+            # partial = billed empty/MAX_TOKENS response that never became text.
+            paid = list(attempts)
+            if exc.partial is not None:
+                paid.append(exc.partial)
+            if paid:
+                exc.attempts = tuple(paid)
             raise
 
         attempts.append(response)
