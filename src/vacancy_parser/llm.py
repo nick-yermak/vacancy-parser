@@ -7,7 +7,9 @@ F — Service validates. The client returns raw response text plus call metadata
     lets FakeLLMClient script invalid JSON without a client-side validator.
 G — complete() takes type[BaseModel], not a TypeVar. A type parameter would only
     pay off if the return type depended on the schema (e.g. client returns T).
-    Under F it does not — generics belong on the future service that returns T.
+    Under F it does not — the client always returns LLMResponse. The service also
+    keeps a concrete JobPosting in ParseResult; a generic belongs only if a
+    caller-chosen schema drove the return type.
 H — FakeLLMClient lives here (not in tests/) so service tests can inject it
     without importing from tests/, and so it stays available for dry-run/demo.
 """
@@ -20,10 +22,6 @@ from typing import Protocol
 from pydantic import BaseModel
 
 
-class LLMError(Exception):
-    """Raised when the LLM API call fails. SDK exceptions must not leak past llm.py."""
-
-
 @dataclass(frozen=True, slots=True)
 class LLMResponse:
     """Raw model text plus call metadata for logging."""
@@ -33,6 +31,24 @@ class LLMResponse:
     input_tokens: int
     output_tokens: int
     latency_ms: float
+
+
+class LLMError(Exception):
+    """Raised when the LLM API call fails. SDK exceptions must not leak past llm.py.
+
+    ``attempts`` carries metadata from earlier successful ``complete`` calls in the
+    same service invocation (e.g. a paid response that failed validation before a
+    later transport error). Empty when the failure is on the first call.
+    """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        attempts: tuple[LLMResponse, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.attempts = attempts
 
 
 class LLMClient(Protocol):

@@ -4,30 +4,30 @@ from dataclasses import dataclass
 
 from pydantic import ValidationError
 
-from vacancy_parser.llm import LLMClient, LLMResponse
+from vacancy_parser.llm import LLMClient, LLMError, LLMResponse
 from vacancy_parser.schemas import JobPosting
 
 MAX_ATTEMPTS = 2
 MAX_VALIDATION_ERRORS = 5
 
-PROMPT_TEMPLATE = """\
+PROMPT_INSTRUCTION = """\
 Extract structured job posting data from the vacancy text below.
-Return JSON that matches the provided schema. Do not invent facts that are not stated.
-
-Vacancy text:
-{vacancy_text}
+Return JSON that matches the provided schema. Do not invent facts that are not stated.\
 """
 
-RETRY_PROMPT_TEMPLATE = """\
-Extract structured job posting data from the vacancy text below.
-Return JSON that matches the provided schema. Do not invent facts that are not stated.
-
+RETRY_ERRORS_TEMPLATE = """\
 Your previous response failed validation. Fix these errors:
-{errors}
-
-Vacancy text:
-{vacancy_text}
+{errors}\
 """
+
+VACANCY_SECTION_TEMPLATE = """\
+Vacancy text:
+{vacancy_text}\
+"""
+
+
+class EmptyVacancyError(Exception):
+    """Raised when vacancy text is empty or whitespace-only (no LLM call)."""
 
 
 class ParseError(Exception):
@@ -51,30 +51,29 @@ def parse_vacancy(text: str, client: LLMClient) -> ParseResult:
 
     Raises
     ------
-    ValueError
+    EmptyVacancyError
         Empty or whitespace-only ``text`` (no LLM call).
     LLMError
-        Propagated from the client without retry.
+        Propagated from the client without retry. Prior paid attempts in this
+        invocation are attached as ``attempts`` (empty on first-call failure).
     ParseError
         Validation failed on every attempt (``attempts`` holds call metadata).
     """
     if not text.strip():
-        raise ValueError("vacancy text is empty")
+        raise EmptyVacancyError("vacancy text is empty")
 
     attempts: list[LLMResponse] = []
     errors_text: str | None = None
 
     for _ in range(MAX_ATTEMPTS):
-        if errors_text is None:
-            prompt = PROMPT_TEMPLATE.format(vacancy_text=text)
-        else:
-            prompt = RETRY_PROMPT_TEMPLATE.format(
-                vacancy_text=text,
-                errors=errors_text,
-            )
+        prompt = _build_prompt(text, errors=errors_text)
 
-        # LLMError from the client propagates: no validation retry on transport failures.
-        response = client.complete(prompt, JobPosting)
+        try:
+            # No validation retry on transport failures; keep prior paid metadata.
+            response = client.complete(prompt, JobPosting)
+        except LLMError as exc:
+            raise LLMError(str(exc), attempts=tuple(attempts)) from exc
+
         attempts.append(response)
 
         try:
@@ -90,6 +89,15 @@ def parse_vacancy(text: str, client: LLMClient) -> ParseResult:
         f"failed to parse vacancy after {MAX_ATTEMPTS} attempts: {errors_text}",
         attempts=tuple(attempts),
     )
+
+
+def _build_prompt(vacancy_text: str, *, errors: str | None = None) -> str:
+    """Assemble the LLM prompt; retry inserts the error block into the base shape."""
+    parts = [PROMPT_INSTRUCTION]
+    if errors is not None:
+        parts.append(RETRY_ERRORS_TEMPLATE.format(errors=errors))
+    parts.append(VACANCY_SECTION_TEMPLATE.format(vacancy_text=vacancy_text))
+    return "\n\n".join(parts) + "\n"
 
 
 def _format_validation_errors(exc: ValidationError) -> str:
