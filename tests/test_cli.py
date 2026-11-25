@@ -6,12 +6,12 @@ import json
 from pathlib import Path
 
 import pytest
-from typer.testing import CliRunner
+from typer.testing import CliRunner, Result
 
 from vacancy_parser import cli
 from vacancy_parser.cli import EXIT_RUNTIME, EXIT_USER, app, map_cli_error
 from vacancy_parser.config import ConfigError
-from vacancy_parser.llm import FakeLLMClient, LLMError, LLMResponse
+from vacancy_parser.llm import FakeLLMClient, LLMClient, LLMError, LLMResponse
 from vacancy_parser.schemas import JobPosting
 from vacancy_parser.service import EmptyVacancyError, ParseError
 
@@ -60,11 +60,8 @@ def _install_fake(
     return fake
 
 
-def _assert_no_traceback_or_secret(result: object) -> None:
-    output = getattr(result, "output", "")
-    stdout = getattr(result, "stdout", "")
-    stderr = getattr(result, "stderr", "")
-    for blob in (output, stdout, stderr):
+def _assert_no_traceback_or_secret(result: Result) -> None:
+    for blob in (result.output, result.stdout, result.stderr):
         assert "Traceback" not in blob
         assert _TEST_KEY not in blob
         assert "padded-cli-secret-must-not-appear" not in blob
@@ -107,6 +104,26 @@ def test_parse_output_file(
     _assert_no_traceback_or_secret(result)
 
 
+def test_parse_output_overwrites_existing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    valid_job_dict: dict[str, object],
+) -> None:
+    vacancy = tmp_path / "vacancy.txt"
+    vacancy.write_text(VACANCY_TEXT, encoding="utf-8")
+    out = tmp_path / "out.json"
+    out.write_text("stale-content-should-be-gone", encoding="utf-8")
+    _install_fake(monkeypatch, [_response(json.dumps(valid_job_dict))])
+
+    result = runner.invoke(app, ["parse", str(vacancy), "-o", str(out)])
+
+    assert result.exit_code == 0
+    text = out.read_text(encoding="utf-8")
+    assert "stale-content-should-be-gone" not in text
+    JobPosting.model_validate_json(text)
+    _assert_no_traceback_or_secret(result)
+
+
 def test_parse_stdin_dash(
     monkeypatch: pytest.MonkeyPatch,
     valid_job_dict: dict[str, object],
@@ -137,7 +154,6 @@ def test_empty_file_does_not_call_llm(
 ) -> None:
     vacancy = tmp_path / "empty.txt"
     vacancy.write_text("   \n", encoding="utf-8")
-    # Any complete() would raise — proves the LLM path was not taken.
     fake = _install_fake(monkeypatch, [LLMError("should not be called")])
 
     result = runner.invoke(app, ["parse", str(vacancy)])
@@ -145,6 +161,16 @@ def test_empty_file_does_not_call_llm(
     assert result.exit_code == EXIT_USER
     assert fake.prompts == []
     assert "empty" in result.stderr.casefold()
+    _assert_no_traceback_or_secret(result)
+
+
+def test_empty_stdin_without_api_key_exit_1() -> None:
+    """Empty input must be exit 1 even when GEMINI_API_KEY is unset."""
+    result = runner.invoke(app, ["parse", "-"], input="  \n")
+
+    assert result.exit_code == EXIT_USER
+    assert "empty" in result.stderr.casefold()
+    assert "GEMINI_API_KEY" not in result.stderr
     _assert_no_traceback_or_secret(result)
 
 
@@ -160,6 +186,25 @@ def test_non_utf8_file_exit_1(
 
     assert result.exit_code == EXIT_USER
     assert "utf-8" in result.stderr.casefold()
+    _assert_no_traceback_or_secret(result)
+
+
+def test_output_directory_checked_before_llm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    valid_job_dict: dict[str, object],
+) -> None:
+    vacancy = tmp_path / "vacancy.txt"
+    vacancy.write_text(VACANCY_TEXT, encoding="utf-8")
+    out_dir = tmp_path / "outdir"
+    out_dir.mkdir()
+    fake = _install_fake(monkeypatch, [_response(json.dumps(valid_job_dict))])
+
+    result = runner.invoke(app, ["parse", str(vacancy), "-o", str(out_dir)])
+
+    assert result.exit_code == EXIT_USER
+    assert "output path is a directory" in result.stderr
+    assert fake.prompts == []
     _assert_no_traceback_or_secret(result)
 
 
@@ -196,7 +241,33 @@ def test_llm_error_exit_2(
     result = runner.invoke(app, ["parse", str(vacancy)])
 
     assert result.exit_code == EXIT_RUNTIME
-    assert "503" in result.stderr or "upstream" in result.stderr
+    assert result.stderr.strip() == "upstream 503"
+    _assert_no_traceback_or_secret(result)
+
+
+def test_unexpected_client_error_exit_2_no_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vacancy = tmp_path / "vacancy.txt"
+    vacancy.write_text(VACANCY_TEXT, encoding="utf-8")
+    monkeypatch.setenv("GEMINI_API_KEY", _TEST_KEY)
+
+    class _BoomClient:
+        def complete(self, prompt: str, response_schema: type) -> LLMResponse:
+            raise RuntimeError("simulated sdk bug")
+
+    def factory(*, api_key: str, model: str) -> LLMClient:
+        return _BoomClient()  # type: ignore[return-value]
+
+    monkeypatch.setattr(cli, "build_llm_client", factory)
+
+    result = runner.invoke(app, ["parse", str(vacancy)])
+
+    assert result.exit_code == EXIT_RUNTIME
+    assert "unexpected error (RuntimeError): simulated sdk bug" in result.stderr
+    assert "Traceback" not in result.output
+    assert "Traceback" not in result.stderr
     _assert_no_traceback_or_secret(result)
 
 
@@ -240,6 +311,28 @@ def test_model_option_reaches_client(
     _assert_no_traceback_or_secret(result)
 
 
+def test_default_model_from_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    valid_job_dict: dict[str, object],
+) -> None:
+    vacancy = tmp_path / "vacancy.txt"
+    vacancy.write_text(VACANCY_TEXT, encoding="utf-8")
+    monkeypatch.setenv("GEMINI_MODEL", "model-from-settings")
+    created: dict[str, str] = {}
+    _install_fake(
+        monkeypatch,
+        [_response(json.dumps(valid_job_dict))],
+        created=created,
+    )
+
+    result = runner.invoke(app, ["parse", str(vacancy)])
+
+    assert result.exit_code == 0
+    assert created["model"] == "model-from-settings"
+    _assert_no_traceback_or_secret(result)
+
+
 def test_help_does_not_expose_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GEMINI_API_KEY", _TEST_KEY)
     result = runner.invoke(app, ["parse", "--help"])
@@ -248,12 +341,15 @@ def test_help_does_not_expose_key(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _TEST_KEY not in result.stdout
     assert _TEST_KEY not in result.stderr
     assert "Traceback" not in result.output
+    assert "Exit codes:" in result.stdout
 
 
-def test_map_cli_error_single_table() -> None:
-    """Sanity: the exception→(message, code) table lives in one function."""
+def test_map_cli_error_known_and_unexpected_codes() -> None:
     assert map_cli_error(EmptyVacancyError("vacancy text is empty"))[1] == EXIT_USER
     assert map_cli_error(ParseError("boom", attempts=()))[1] == EXIT_USER
     assert map_cli_error(LLMError("api down"))[1] == EXIT_RUNTIME
     assert map_cli_error(ConfigError("missing key"))[1] == EXIT_RUNTIME
     assert map_cli_error(FileNotFoundError(2, "nope", "x.txt"))[1] == EXIT_USER
+    message, code = map_cli_error(RuntimeError("boom"))
+    assert code == EXIT_RUNTIME
+    assert message == "unexpected error (RuntimeError): boom"
