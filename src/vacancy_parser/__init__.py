@@ -1,2 +1,3 @@
-def main() -> None:
-    print("Hello from vacancy-parser!")
+from vacancy_parser.cli import main
+
+__all__ = ["main"]
