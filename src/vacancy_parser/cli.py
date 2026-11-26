@@ -5,6 +5,7 @@ No business logic here — only wiring, I/O, and exit-code mapping.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Annotated, NoReturn
@@ -21,7 +22,7 @@ EXIT_RUNTIME = 2
 
 EXIT_CODES_EPILOG = """\
 Exit codes:
-  0  success
+  0  success; also quiet exit on broken stdout pipe (e.g. | head)
   1  input/validation (empty text, missing/non-UTF-8 file, ParseError);
      also Ctrl+C → Click prints 'Aborted!' and exits 1
   2  config, LLM/API, or unexpected internal/SDK errors;
@@ -87,17 +88,16 @@ def map_cli_error(exc: BaseException) -> tuple[str, int]:
         return (f"expected a file, got a directory: {name}", EXIT_USER)
     if isinstance(exc, UnicodeDecodeError):
         return ("input is not valid UTF-8", EXIT_USER)
-    if isinstance(exc, UnicodeEncodeError):
-        return ("failed to encode output as UTF-8", EXIT_USER)
     if isinstance(exc, LLMError):
         return (str(exc) or "LLM request failed", EXIT_RUNTIME)
     if isinstance(exc, ConfigError):
         return (str(exc), EXIT_RUNTIME)
     if isinstance(exc, OSError):
+        # BrokenPipeError is handled before _fail (quiet exit 0 for ``| head``).
         return (f"I/O error: {exc}", EXIT_USER)
-    # Fallback for unexpected bugs (TypeError from SDK, etc.): runtime, not user.
-    detail = str(exc).strip() or type(exc).__name__
-    return (f"unexpected error ({type(exc).__name__}): {detail}", EXIT_RUNTIME)
+    # Unknown exceptions (raw SDK/HTTP) may embed URL/headers/body with the key.
+    # Show type only; details wait for --verbose in step 7.
+    return (f"unexpected error ({type(exc).__name__})", EXIT_RUNTIME)
 
 
 def _fail(exc: BaseException) -> NoReturn:
@@ -107,6 +107,20 @@ def _fail(exc: BaseException) -> NoReturn:
     # for step-7 logging without printing token/prompt metadata to the user.
     _write_stderr(message)
     raise typer.Exit(code)
+
+
+def _exit_on_broken_pipe() -> NoReturn:
+    """Quiet exit when the consumer closed stdout early (e.g. ``| head -c 10``).
+
+    Redirect stdout to ``/dev/null`` so interpreter shutdown does not print
+    ``Exception ignored … BrokenPipeError``. Exit 0: truncation was intentional.
+    """
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+    except OSError:
+        pass
+    raise typer.Exit(EXIT_OK)
 
 
 def _write_stderr(message: str) -> None:
@@ -193,8 +207,8 @@ def parse_command(
         result = parse_vacancy(text, client)
         # ``result.attempts`` reserved for step-7 logging (not printed).
         _emit_json(result.posting.model_dump_json(), output)
-    except typer.Exit:
-        raise
+    except BrokenPipeError:
+        _exit_on_broken_pipe()
     except Exception as exc:
         _fail(exc)
 

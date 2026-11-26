@@ -9,7 +9,7 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from vacancy_parser import cli
-from vacancy_parser.cli import EXIT_RUNTIME, EXIT_USER, app, map_cli_error
+from vacancy_parser.cli import EXIT_OK, EXIT_RUNTIME, EXIT_USER, app, map_cli_error
 from vacancy_parser.config import ConfigError
 from vacancy_parser.llm import FakeLLMClient, LLMClient, LLMError, LLMResponse
 from vacancy_parser.schemas import JobPosting
@@ -253,9 +253,11 @@ def test_unexpected_client_error_exit_2_no_traceback(
     vacancy.write_text(VACANCY_TEXT, encoding="utf-8")
     monkeypatch.setenv("GEMINI_API_KEY", _TEST_KEY)
 
+    leak = f"https://example.com/?key={_TEST_KEY}"
+
     class _BoomClient:
         def complete(self, prompt: str, response_schema: type) -> LLMResponse:
-            raise RuntimeError("simulated sdk bug")
+            raise RuntimeError(f"sdk failed: {leak}")
 
     def factory(*, api_key: str, model: str) -> LLMClient:
         return _BoomClient()  # type: ignore[return-value]
@@ -265,9 +267,34 @@ def test_unexpected_client_error_exit_2_no_traceback(
     result = runner.invoke(app, ["parse", str(vacancy)])
 
     assert result.exit_code == EXIT_RUNTIME
-    assert "unexpected error (RuntimeError): simulated sdk bug" in result.stderr
+    assert result.stderr.strip() == "unexpected error (RuntimeError)"
+    assert leak not in result.stderr
+    assert leak not in result.output
     assert "Traceback" not in result.output
     assert "Traceback" not in result.stderr
+    _assert_no_traceback_or_secret(result)
+
+
+def test_broken_pipe_exits_quietly_without_io_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    valid_job_dict: dict[str, object],
+) -> None:
+    vacancy = tmp_path / "vacancy.txt"
+    vacancy.write_text(VACANCY_TEXT, encoding="utf-8")
+    _install_fake(monkeypatch, [_response(json.dumps(valid_job_dict))])
+
+    def _raise_broken_pipe(_text: str) -> None:
+        raise BrokenPipeError()
+
+    monkeypatch.setattr(cli, "_write_stdout", _raise_broken_pipe)
+
+    result = runner.invoke(app, ["parse", str(vacancy)])
+
+    assert result.exit_code == EXIT_OK
+    assert "I/O error" not in result.stderr
+    assert "BrokenPipe" not in result.stderr
+    assert "Exception ignored" not in result.output
     _assert_no_traceback_or_secret(result)
 
 
@@ -350,6 +377,7 @@ def test_map_cli_error_known_and_unexpected_codes() -> None:
     assert map_cli_error(LLMError("api down"))[1] == EXIT_RUNTIME
     assert map_cli_error(ConfigError("missing key"))[1] == EXIT_RUNTIME
     assert map_cli_error(FileNotFoundError(2, "nope", "x.txt"))[1] == EXIT_USER
-    message, code = map_cli_error(RuntimeError("boom"))
+    message, code = map_cli_error(RuntimeError("secret-in-message"))
     assert code == EXIT_RUNTIME
-    assert message == "unexpected error (RuntimeError): boom"
+    assert message == "unexpected error (RuntimeError)"
+    assert "secret-in-message" not in message

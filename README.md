@@ -12,7 +12,7 @@ Exit codes (also shown in `--help` epilog):
 
 | Code | Meaning |
 |------|---------|
-| 0 | Success |
+| 0 | Success. Also quiet exit when stdout is a closed pipe (e.g. piped to `head`), with no `I/O error` / `Exception ignored`. |
 | 1 | Input/validation: empty text, missing/non-UTF-8 file, bad `-o`, `ParseError`. Ctrl+C also exits 1 (`Aborted!` from Click). |
 | 2 | Config, LLM/API, or unexpected internal/SDK errors. Click/Typer usage errors (bad argv) also exit 2 before our handler — usage mistakes are deterministic, so we keep Click’s code rather than remapping. |
 
