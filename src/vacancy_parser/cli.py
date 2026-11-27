@@ -92,11 +92,11 @@ def map_cli_error(exc: BaseException) -> tuple[str, int]:
         return (str(exc) or "LLM request failed", EXIT_RUNTIME)
     if isinstance(exc, ConfigError):
         return (str(exc), EXIT_RUNTIME)
-    if isinstance(exc, OSError):
-        # BrokenPipeError is handled before _fail (quiet exit 0 for ``| head``).
+    if isinstance(exc, OSError) and not isinstance(exc, BrokenPipeError):
         return (f"I/O error: {exc}", EXIT_USER)
     # Unknown exceptions (raw SDK/HTTP) may embed URL/headers/body with the key.
     # Show type only; details wait for --verbose in step 7.
+    # BrokenPipeError from the LLM/socket layer (not stdout) lands here → exit 2.
     return (f"unexpected error ({type(exc).__name__})", EXIT_RUNTIME)
 
 
@@ -128,9 +128,18 @@ def _write_stderr(message: str) -> None:
     sys.stderr.buffer.flush()
 
 
-def _write_stdout(text: str) -> None:
-    sys.stdout.buffer.write(text.encode("utf-8"))
+def _stdout_write_bytes(data: bytes) -> None:
+    """Raw stdout write — BrokenPipe here means the consumer closed the pipe."""
+    sys.stdout.buffer.write(data)
     sys.stdout.buffer.flush()
+
+
+def _write_stdout(text: str) -> None:
+    """Write UTF-8 to stdout; only this path treats BrokenPipe as quiet success."""
+    try:
+        _stdout_write_bytes(text.encode("utf-8"))
+    except BrokenPipeError:
+        _exit_on_broken_pipe()
 
 
 def _read_input(source: str) -> str:
@@ -207,9 +216,12 @@ def parse_command(
         result = parse_vacancy(text, client)
         # ``result.attempts`` reserved for step-7 logging (not printed).
         _emit_json(result.posting.model_dump_json(), output)
-    except BrokenPipeError:
-        _exit_on_broken_pipe()
+    except typer.Exit:
+        # Live: _write_stdout → _exit_on_broken_pipe raises typer.Exit(0).
+        raise
     except Exception as exc:
+        # BrokenPipe from stdout is handled inside _write_stdout only — an SDK
+        # socket BrokenPipe must fall through here → unexpected error, exit 2.
         _fail(exc)
 
 

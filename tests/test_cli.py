@@ -275,7 +275,7 @@ def test_unexpected_client_error_exit_2_no_traceback(
     _assert_no_traceback_or_secret(result)
 
 
-def test_broken_pipe_exits_quietly_without_io_error(
+def test_broken_pipe_on_stdout_exits_quietly(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     valid_job_dict: dict[str, object],
@@ -284,10 +284,10 @@ def test_broken_pipe_exits_quietly_without_io_error(
     vacancy.write_text(VACANCY_TEXT, encoding="utf-8")
     _install_fake(monkeypatch, [_response(json.dumps(valid_job_dict))])
 
-    def _raise_broken_pipe(_text: str) -> None:
+    def _raise_broken_pipe(_data: bytes) -> None:
         raise BrokenPipeError()
 
-    monkeypatch.setattr(cli, "_write_stdout", _raise_broken_pipe)
+    monkeypatch.setattr(cli, "_stdout_write_bytes", _raise_broken_pipe)
 
     result = runner.invoke(app, ["parse", str(vacancy)])
 
@@ -295,6 +295,32 @@ def test_broken_pipe_exits_quietly_without_io_error(
     assert "I/O error" not in result.stderr
     assert "BrokenPipe" not in result.stderr
     assert "Exception ignored" not in result.output
+    _assert_no_traceback_or_secret(result)
+
+
+def test_broken_pipe_from_client_is_unexpected_exit_2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vacancy = tmp_path / "vacancy.txt"
+    vacancy.write_text(VACANCY_TEXT, encoding="utf-8")
+    monkeypatch.setenv("GEMINI_API_KEY", _TEST_KEY)
+
+    class _BoomClient:
+        def complete(self, prompt: str, response_schema: type) -> LLMResponse:
+            raise BrokenPipeError("socket to API died")
+
+    def factory(*, api_key: str, model: str) -> LLMClient:
+        return _BoomClient()  # type: ignore[return-value]
+
+    monkeypatch.setattr(cli, "build_llm_client", factory)
+
+    result = runner.invoke(app, ["parse", str(vacancy)])
+
+    assert result.exit_code == EXIT_RUNTIME
+    assert result.stderr.strip() == "unexpected error (BrokenPipeError)"
+    assert "socket to API died" not in result.stderr
+    assert result.stdout == ""
     _assert_no_traceback_or_secret(result)
 
 
